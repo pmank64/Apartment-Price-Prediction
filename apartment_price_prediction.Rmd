@@ -1,0 +1,720 @@
+---
+title: "Home Prices EDA and Machine Learning"
+output: html_document
+
+---
+
+```{r setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE, echo=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(glmnet)
+library(plotly)
+library(MASS)
+library(caret)
+library(leaps)
+library(tibble)
+library(magrittr) 
+library(dplyr)
+library(tidyverse)
+library(scales)
+library(tree)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+
+theme_set(theme_classic())
+```
+
+
+# Executive Summary
+As a team, we set out to develop a model to predict apartments prices in South Korea based on various features about the location and attributes of the particular apartment. Housing prices is an area of big concern all over the world given our ever growing population. South Korea, a country in which about 59.9% of all homes are apartments, is no exception. We will specifically be examining apartments in order to understand which factors contribute most to apartments prices, and to predict prices for apartments that we have not yet seen. For a family searching for a home in South Korea, this model can help them to understand if they are overpaying. For example, if they know the location of the apartment and some basic information, such as the number of rooms, they can determine if they are being offered a fair price. In addition, the landlord or seller of the property can use this model to calculate a fair price for the apartment.
+
+
+Our Dataset contains the following features:
+
+* transaction_real_price: the price that the apartment was sold at (target variable)
+* key: increments by one based on the row number
+* apartment_id: a unique identifier for the building in which the apartment is found
+* transaction_year_month: the year and month the transaction took place
+* transaction_date: the date on which the transaction took place
+* year_of_completion: the year the apartment was built
+* exclusive_use_area: the total floor area of the building
+* floor: the floor number that the apartment building is located
+* latitude: latitude of the apartment
+* longitude: longitude of the apartment
+* address_by_law: address represented numerically
+* total_parking_capacity_in_site: the number of parking spots for the entire building complex in which the apartment is located (potentially there could be multiple separate buildings in the site)
+* total_household_count_in_site: The number of separate households located in the apartment complex
+* apartment_building_count_in_sites: the number of separate apartments building in the apartment complex
+* tallest_building_in_sites: the number of floors of the tallest building in the apartment complex
+* lowest_building_in_sites: the number of floors of the shortest building in the apartment complex
+* heat_type: the type of heat available tot he apartment (individual, central, district)
+* heat_fuel: the type of heating fuel used by the apartment (gas, cogeneration)
+* room_id: unique identifier for the apartment
+* supply_area: Total site area (area of the entire apartment complex)
+* total_household_count_of_area_type: Count of households in the immediate area
+* room_count: the number of rooms in the apartment
+* bathroom_count: the number of bathrooms in the apartment
+* front_door_structure: the structure of the entrance to the apartment (corridor, stairway, mixed)
+
+
+
+# EDA and Data Cleaning
+
+#### Load in dataset
+```{r}
+setwd("C:/Users/pmank/Dropbox/BU/BA810/group_project")
+Price <- fread("trainPrice.csv")
+```
+
+#### First few rows
+We can see that we have a total of 25 features in the dataset
+```{r}
+head(Price, 5)
+```
+
+#### Structure of the dataset
+There are a total of 1,601,458 observations
+```{r}
+str(Price)
+transform(Price, transaction_real_price = as.numeric(transaction_real_price))
+#summary(Price)
+```
+
+## Data Cleaning
+
+#### View the count of null values in each column
+The feature, total_parking_capacity_in_site has the largest number of null values (91813)
+```{r}
+Price[, lapply(.SD, function(x) sum(is.na(x)))]
+```
+#### View all unique values present in columns
+```{r}
+unique(Price$heat_type)
+```
+#### How many values are empty strings or dashes?
+First, we will view the unique values to understand if there are any other invalid values other than NA
+```{r}
+unique(Price$city)
+unique(Price$bathroom_count)
+unique(Price$room_count)
+unique(Price$front_door_structure)
+unique(Price$year_of_completion)
+```
+A number of columns have an empty string value or one dash rather than an NA value, we will remove these from the dataset.
+```{r}
+Price[heat_type == ''][, .N]
+Price[heat_fuel == ''][, .N]
+Price[front_door_structure == ''][, .N]
+Price[heat_fuel == '-'][, .N]
+Price[front_door_structure == '-'][, .N]
+```
+
+We can remove these empty string and dash values
+```{r}
+Price <- Price[heat_fuel != '']
+Price <- Price[heat_fuel != '-']
+Price <- Price[front_door_structure != '-']
+Price <- Price[heat_type != '']
+Price <- Price[front_door_structure != '']
+```
+
+#### Drop rows room_count as 8
+After examining the dataset, we determined that this was an outlier since only a very small number of apartments were shown as having 8 rooms
+```{r}
+Price <- Price[room_count != 8]
+```
+
+#### Remove all rows that have missing values
+There are a total of 1601458 million observations, and we will be removing less than 100,000 of them.
+We can confirm that rows were removed using .N (the number of observations)
+```{r}
+Price <- na.omit(Price)
+Price[, .N]
+```
+
+
+##### Create dummy variables for use in later ML steps
+We will convert transaction_date, heat_type, heat_fuel, and front_door_structure
+```{r}
+Price <- Price[transaction_date == "1~10", transaction_date:=1]
+Price <- Price[transaction_date == "11~20", transaction_date:=2]
+Price <- Price[transaction_date == "21~30", transaction_date:=3]
+Price <- Price[transaction_date == "21~28", transaction_date:=3]
+Price <- Price[transaction_date == "21~29", transaction_date:=3]
+Price <- Price[transaction_date == "21~31", transaction_date:=3]
+Price[,transaction_date := as.numeric(transaction_date)]
+
+Price <- Price[heat_fuel == "gas", heat_fuel:=0]
+Price <- Price[heat_fuel == "cogeneration", heat_fuel:=1]
+Price[,heat_fuel := as.numeric(heat_fuel)]
+
+Price[,transaction_real_price := as.numeric(transaction_real_price)] 
+Price[,address_by_law := as.numeric(address_by_law)]
+
+Price <- fastDummies::dummy_cols(Price)
+
+```
+
+
+
+# EDA
+In the EDA section, we wanted to create a few graphs to help us understand the distribution of our features, and also how our features relate to the target variable, transaction_real_price (this is the price that each apartments sells at). The charts below reveal that there are a number of features that seem to relate to the price, including the city, number of rooms, front door structure, heating fuel type, and heat type. These charts were also helpful in understanding unusual values. We found that there were a few apartments that had 8 rooms, but a very low price. We decided to remove these above in the data cleaning section.
+
+#### Barchart showing real price and city
+Below, 1 is Busan and 0 is Seoul. We can see that on average, prices tend to be higher in Busan.
+```{r}
+ggplot(Price, aes(x=as.factor(city), y = transaction_real_price, fill = city)) + 
+  
+  geom_bar(stat = "summary", fun = "mean") +
+  scale_color_manual(values=c("red", "blue")) +
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  
+  theme(legend.position="none") +
+  xlab('City') +
+  ylab('Price (Korean Won)')
+```
+
+#### Barchart showing real price and room count
+```{r}
+ggplot(Price, aes(x=room_count, y = transaction_real_price, fill = room_count)) + 
+  geom_bar(stat = "summary", fun = "mean")+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  theme(legend.position="none")+
+  xlab('Number of Rooms') +
+  ylab('Price (Korean Won)')
+  
+```
+#### Barchart showing real price and front_door_structure
+```{r}
+ggplot(Price, aes(x=front_door_structure, y = transaction_real_price, fill = front_door_structure)) + 
+  geom_bar(stat = "summary", fun = "mean")+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  theme(legend.position="none")+
+  xlab('Front Door Structure') +
+  ylab('Price (Korean Won)')
+```
+
+#### Barchart showing real price and heat_fuel
+Below, 0 represents gas and 1 is co-generation
+```{r}
+ggplot(Price, aes(x=as.factor(heat_fuel), y = transaction_real_price, fill = heat_fuel)) + 
+  geom_bar(stat = "summary", fun = "mean")+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  theme(legend.position="none")+
+  xlab('Heating Fuel Type') +
+  ylab('Price (Korean Won)')
+```
+#### Barchart showing real price and heat_type
+Below, 0 is individual, 1 is central and 2 is district
+```{r}
+ggplot(Price, aes(x=heat_type, y = transaction_real_price, fill = heat_type)) + 
+  geom_bar(stat = "summary", fun = "mean")+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  theme(legend.position="none")+
+  xlab('Heat Type') +
+  ylab('Price (Korean Won)')
+```
+
+
+
+
+
+#### Plotly Map showing locations of apartments
+We can see that all of the apartments are either in Seoul or Busan. This is coded in the data in the city feature.
+```{r}
+fig <- head(Price, 100000)
+fig <- fig %>%
+   plot_ly(
+     lat = ~latitude,
+     lon = ~longitude,
+     #marker = list(color = "fuchsia"),
+     color = Price[,"transaction_real_price"],
+     type = 'scattermapbox',
+     hovertext = Price[,"transaction_real_price"]) 
+ fig <- fig %>%
+   layout(
+     mapbox = list(
+       style = 'open-street-map',
+       zoom =2.5,
+       center = list(longitude = 35.963911, latitude = 127.919770))) 
+ 
+fig
+```
+
+
+
+# Machine Learning
+In this section, we used a number of machine learning techniques to predict the prices of apartments in South Korea. We used the following models:
+
+* Linear Regression
+* Forward Regression
+* Backward Regression
+* Ridge Regression
+* Lasso Regression
+* Decision Tree
+* Bagging
+* Random Forest
+* Boosting
+
+## Drop useless columns
+Below, we will remove apartment_id, room_id, and key since these are not useful in prediction. We also removed redundant dummy variables.
+```{r}
+Price[,key := NULL]
+Price[,apartment_id := NULL]
+Price[,room_id := NULL]
+Price[,heat_type := NULL]
+Price[,front_door_structure := NULL]
+Price[,heat_type_individual := NULL]
+Price[,front_door_structure_stairway := NULL]
+# prevent aliased coefficients
+```
+ 
+## Setup test and train datasets
+```{r}
+# Set the seed to get consistent results
+set.seed(810)
+
+rows <- sample(nrow(Price), 160000)
+Price <- Price[rows,]
+
+# Split the data
+# This way we can do an 80/20 split
+row_index <- sample(nrow(Price), 128000)
+
+# we use that set of random numbers to select those random rows
+dd_train <- Price[row_index,]
+dd_test <- Price[-row_index,]
+```
+
+
+## Linear Regression
+We started by trying linear regression model. We used an 80/20 split between our test and train datasets, and used all of the features to predict price. 
+For this model, we calculated a Train RMSE score of 188,332,311 Korean Won. We calculated a Test RMSE score of 188,544,540 Korean Won.
+```{r}
+# our response variables to use later
+set.seed(810)
+y_train <- dd_train$transaction_real_price
+y_test <- dd_test$transaction_real_price
+
+# fit the full model
+fit_lm1 <- lm(transaction_real_price ~ ., data=dd_train)
+yhat_train_lm1 <- predict(fit_lm1)
+mse_train_lm1 <- mean((y_train - yhat_train_lm1)^2)
+paste("Linear Regression Train RMSE",sqrt(mse_train_lm1))
+yhat_test_lm1 <- predict(fit_lm1, dd_test)
+mse_test_lm1 <- mean((y_test - yhat_test_lm1)**2)
+paste("Linear Regression Test RMSE",sqrt(mse_test_lm1))
+```
+
+A summary of the coefficient values in the model.
+```{r}
+summary(fit_lm1)
+```
+
+
+## Forward Selection
+In forward selection, we used cross validation to split our data into 10 groups. In this model, we found that as the number of predictors in the model increased, our MSE decreased. This model would suggest that all of the features would be useful; however, we know that forward and backward selection don't test every possible combination.
+
+In the output below, we can see that there is a separate results for reach model, starting with just one explanatory variable, and ending with a model with all 24 variables.
+
+In this model, our lowest RMSE was 188,321,979 Korean Won with 21 variables.
+
+
+```{r}
+# Set up repeated k-fold cross-validation
+set.seed(810)
+train.control <- trainControl(method = "cv", number = 10)
+
+# Train the model
+
+step.model_f <- train(transaction_real_price ~., data = dd_train,
+      method = "leapForward",
+       tuneGrid = data.frame(nvmax = 1:23),
+       trControl = train.control
+       )
+step.model_f$results
+
+```
+Two variable we exclude is transaction_date and front_door_structure_mixed
+```{r}
+#Choose the best tuned model
+summary(step.model_f$finalModel)
+```
+
+```{r}
+x1f <- step.model_f$results[,2]
+plot(x1f,type = "o",col = "red",xlab = "Number of Variables Added", ylab = "RMSE",
+   main = "Forward Train RMSE")
+legend("topright", 
+  legend = c("Train"),
+  col = c("red"), 
+  pch = c(1,1), 
+  bty = "n", 
+  pt.cex = 2, 
+  cex = 1.2, 
+  text.col = "black", 
+  horiz = F , 
+  inset = c(0.1, 0.1))
+```
+
+
+## Backward selection
+In this model, we came to the same conclusion that the most optimal model has 21 variable with the lowest RMSE of 188,321,979 Korean Won.
+```{r}
+set.seed(810)
+#Backward train
+# Set up repeated k-fold cross-validation
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+step.model_b <- train(transaction_real_price ~., data = dd_train,
+                    method = "leapBackward", 
+                    tuneGrid = data.frame(nvmax = 1:23),
+                    trControl = train.control
+                    )
+step.model_b$results
+```
+Two variable we exclude is transaction_date and front_door_structure_mixed
+```{r}
+#Choose the best tuned model
+summary(step.model_b$finalModel)
+```
+
+```{r}
+x1 <- step.model_b$results[,2]
+plot(x1,type = "o",col = "red",xlab = "Number of Variables Added", ylab = "RMSE",
+   main = "Backward Train RMSE")
+legend("topright", 
+  legend = c("Train"),
+  col = c("red"), 
+  pch = c(1,1), 
+  bty = "n", 
+  pt.cex = 2, 
+  cex = 1.2, 
+  text.col = "black", 
+  horiz = F , 
+  inset = c(0.1, 0.1))
+```
+Since the model chosen by Forward/Backward is the same containing the same variables, let's fit it to calculate the final test RMSE. So, Forward/Backward Selection Regression Test RMSE is 188,550,321 Korean Won.
+```{r}
+# Fit the model chosen by forward and backward
+set.seed(810)
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+fit_fb <- train(transaction_real_price ~ city + transaction_year_month  + year_of_completion + exclusive_use_area + floor + longitude + latitude + address_by_law + total_parking_capacity_in_site + total_household_count_in_sites + apartment_building_count_in_sites + tallest_building_in_sites + lowest_building_in_sites + heat_type_central +heat_type_district + heat_fuel + supply_area + total_household_count_of_area_type + room_count + bathroom_count +front_door_structure_corridor, data=dd_train, method = "lm",
+               trControl = train.control)
+# Summarize the results
+print(fit_fb)
+
+yhat_test_fb <- predict(fit_fb, dd_test)
+mse_test_fb <- mean((y_test - yhat_test_fb)**2)
+paste("Forward/Backward Selection Regression Test RMSE",sqrt(mse_test_fb))
+```
+
+#### Setup for Ridge and Lasso Regression
+We created a new formula that includes all 23 predictors, and split out test and train datasets
+```{r}
+# added all of the variables to the formula so that we can have 24 predictors
+f2 <- as.formula(transaction_real_price ~  city + transaction_year_month + transaction_date + year_of_completion + exclusive_use_area + floor + longitude + latitude + address_by_law + total_parking_capacity_in_site + total_household_count_in_sites + apartment_building_count_in_sites + tallest_building_in_sites + lowest_building_in_sites + heat_type_central +heat_type_district + heat_fuel + supply_area + total_household_count_of_area_type + room_count + bathroom_count + front_door_structure_mixed +front_door_structure_corridor)
+
+x1_train_sample <- model.matrix(f2, dd_train)[,-1]
+x1_test <- model.matrix(f2, dd_test)[,-1]
+```
+
+
+## Ridge Regression
+We used cross validation to identify the best lambda value. We can see that this model actually performs slightly worse compared to linear regression. 
+The graph reveals that as the training ran, our coefficients converged towards zero.
+```{r}
+# fit the ridge regression using the cross validation data
+fit.ridge <- cv.glmnet(x1_train_sample, y_train, alpha = 0)
+
+# make predictions using fitted model
+ridge.coef <- predict(fit.ridge,
+        type = "coefficients",
+        s = fit.ridge$lambda)
+to_plot <- data.table(
+  lambda = fit.ridge$lambda,
+  coef_value = ridge.coef[2, ]
+)
+
+# plot the coefficient values for different values of lambda
+ggplot(to_plot, aes(log(lambda), coef_value)) +
+  geom_line() +
+  theme_few()
+
+# MSE for train
+yhat.train.ridge <- predict(fit.ridge, x1_train_sample, s = fit.ridge$lambda.min)
+mse.train.ridge <- mean((y_train - yhat.train.ridge)^2)
+
+# MSE to test
+yhat.test.ridge <- predict(fit.ridge, x1_test, s = fit.ridge$lambda.min)
+mse.test.ridge <- mean((y_test - yhat.test.ridge)^2)
+
+cat("Train RMSE: ",sqrt(mse.train.ridge))
+cat(" Test RMSE: ",sqrt(mse.test.ridge))
+
+cat(" Best Lambda: ", fit.ridge$lambda.min)
+```
+
+## Lasso Regression
+In this model, we again used cross validation to find the optimal lambda value. In the output below, we can see the coefficient value associated with each of our predictors. None of the coefficient values are zero,increasing confidence that we are not overfiting, and that all of our features are contributing to the model.
+```{r}
+fit.lasso <- cv.glmnet(x1_train_sample, y_train, alpha = 1)
+
+# predict based on most optimal lambda found above
+lasso.coef <- predict(fit.lasso,
+        type = "coefficients",
+        s = fit.lasso$lambda)
+to_plot <- data.table(
+  lambda = fit.lasso$lambda,
+  coef_value = lasso.coef[2, ]
+)
+
+# plot the coefficient values for different values of lambda
+ggplot(to_plot, aes(log(lambda), coef_value)) +
+  geom_line() +
+  theme_few()
+
+yhat.train.lasso <- predict(fit.lasso, x1_train_sample, s = fit.lasso$lambda.min)
+mse.train.lasso <- mean((y_train - yhat.train.lasso)^2)
+
+yhat.test.lasso <- predict(fit.lasso, x1_test, s = fit.lasso$lambda.min)
+mse.test.lasso <- mean((y_test - yhat.test.lasso)^2)
+
+cat("Train RMSE: ",sqrt(mse.train.lasso))
+cat(" Test RMSE: ",sqrt(mse.test.lasso))
+
+cat(" Best Lambda: ", fit.lasso$lambda.min)
+```
+
+
+## Decision Tree
+In our decision tree model, we use row_index to get the same observations used in the previous models.
+```{r}
+tree.price = tree(transaction_real_price ~ . , Price, subset = row_index)
+
+summary(tree.price)
+```
+
+We can see that we don't have to prune that tree because the largest tree (size = 14), has the lowest cross validation error.
+```{r}
+# Prune Tree
+cv.price = cv.tree(tree.price)
+plot(cv.price$size,cv.price$dev, type = "b")
+cv.price
+```
+
+Our RMSE below is 189,891,653.318 Korean Won.
+```{r}
+#Test MSE
+tree.yhat = predict(tree.price,newdata=dd_test)
+mean((tree.yhat - y_test)^2) 
+``` 
+
+
+```{r}
+#Lecture Method to deal with decision tree
+set.seed(217)
+tree.price.lec <- rpart(transaction_real_price ~ ., Price,subset = row_index,
+                    control = rpart.control(cp=0.01))
+rpart.plot(tree.price.lec,type = 1)
+```
+
+
+
+## Bagging
+
+
+```{r}
+#### Trends of Test MSE as number of data in training growing (1% to 5%)
+#set.seed(217)
+#test.mse = c()
+
+#for (i in seq(1,5)) {
+ # train = sample(1:nrow(Price),(nrow(Price)/100)*i)
+#  tree.testy = Price[-train,transaction_real_price]
+#  tree.test = Price[-train]
+#  bag.price = randomForest(transaction_real_price ~ ., data = Price, subset = train, mtry = 24, importance = TRUE)
+#  yhat.bag = predict(bag.price, newdata = tree.test)
+ # test.mse = c(test.mse,mean((tree.testy-yhat.bag)^2))
+#}
+
+#test.mse 
+
+```
+
+
+#### Bagging using 5000 rows as training 
+We decided to use 5000 rows for compute resource reasons. We then used the remaining data to calculate the test MSE. We found that there was a significant improvement in the RMSE, which we calculate to be 101,033,509.293 Korean Won. Also, we found that when we increased the number of observations in the train dataset, our MSE went down significantly. 
+```{r}
+bag.price = randomForest(transaction_real_price ~ ., data = dd_train, mtry=21, importance = TRUE)
+yhat.bag.train = predict(bag.price, newdata = dd_train)
+cat("RMSE train: ", sqrt(mean((y_train-yhat.bag.train)^2)))
+```
+
+
+```{r}
+yhat.bag = predict(bag.price, newdata = dd_test)
+cat(" RMSE test: ", sqrt(mean((y_test-yhat.bag)^2)))
+```
+
+
+
+
+## Random Forest
+This process is similar to bagging; we took a sample of 5000 observations from the dataset. We then ran the random forest model on out sample, and computed an MSE. The MSE was again an improvement over some of the less flexible models earlier in the report. We calculated a test MSE of 102,026,222.12 Korean Won. Due to the fact that we are only able to take a sample of 5000 observations, the model has higher variability since the MSE can change significantly every time we run the model.
+```{r}
+rf.price = randomForest(transaction_real_price ~ ., data = Price, subset = row_index, mtry = 5, importance = TRUE)
+
+yhat.rf.train = predict(rf.price, newdata = dd_train)
+cat("RMSE train: ", sqrt(mean((y_train-yhat.rf.train)^2)))
+```
+
+```{r}
+yhat.rf = predict(rf.price, newdata = dd_test)
+cat(" RMSE test: ", sqrt(mean((y_test-yhat.rf)^2)))
+```
+
+
+```{r}
+importance(rf.price)
+```
+The visualization below reveals that supply area is relatively more important compared to the other predictors. Exclusive use area is also an important predictor.
+```{r}
+varImpPlot(rf.price)
+```
+
+
+
+
+## Boosting
+the boosting process reveals similar finding to what we saw with random forest above. Again, we can see that supply area, and exclusive use area are both relatively more important compared to the other predictors. 
+
+#### select a random sample of 10000 observations
+```{r}
+# get a random sample of row numbers from the train dataset
+train_sample_index = sample(1:nrow(dd_train),nrow(dd_train)*4/5)
+# use those rows to get the actual data from the train data
+train_sample = dd_train[train_sample_index,]
+# get the price column from the train dataset
+tree.testy_sample <- dd_test[train_sample_index, transaction_real_price]
+```
+
+In the below model, we started with just 5000 trees. We then go on to perform feature engineering, and use cross validation to find the optimal number of trees.
+```{r}
+boost.price = gbm(transaction_real_price ~ ., data = train_sample, distribution = "gaussian", n.trees = 5000, interaction.depth = 4 )
+summary(boost.price)
+```
+
+
+The results of the boosting model reveal the following RMSEs in Korean Won. This model produced the lowest error of any of the models in the report.
+```{r}
+yhat.boost.train = predict(boost.price, newdata = dd_train, n.trees = 5000)
+cat("RMSE train: ", sqrt(mean((dd_train$transaction_real_price - yhat.boost.train)^2)))
+```
+
+
+```{r}
+#Evaluate boosted tree model
+yhat.boost.test = predict(boost.price, newdata = dd_test, n.trees = 5000)
+cat(" RMSE test: ", sqrt(mean((dd_test$transaction_real_price - yhat.boost.test)^2)))
+```
+
+
+
+
+#### Feature Engineering
+```{r}
+dd_train_engineering <- copy(dd_train)
+dd_test_engineering <- copy(dd_test)
+
+# feature engineering for train
+# perform feature engineering to put the latitude and longitude in 3d space
+dd_train_engineering[, x := cos(latitude) * cos(longitude)]
+dd_train_engineering[, y := cos(latitude) * sin(longitude)]
+dd_train_engineering[, z := sin(latitude)]
+
+dd_train_engineering[, living_area := supply_area - exclusive_use_area]
+dd_train_engineering[, bathroom_per_living_area := bathroom_count/living_area]
+dd_train_engineering[, area_ratio := exclusive_use_area / supply_area]
+dd_train_engineering[, household_ratio := total_household_count_of_area_type / total_household_count_in_sites]
+dd_train_engineering[, total_household_per_building_count := total_household_count_in_sites / apartment_building_count_in_sites]
+dd_train_engineering[, age_of_apartment := 2021 - year_of_completion]
+
+dd_train_engineering[, year := as.numeric(substr(transaction_year_month, 1,4))]
+dd_train_engineering[, month := as.numeric(substr(transaction_year_month, 5,6))]
+
+# feature engineering for test
+dd_test_engineering[, x := cos(latitude) * cos(longitude)]
+dd_test_engineering[, y := cos(latitude) * sin(longitude)]
+dd_test_engineering[, z := sin(latitude)]
+
+dd_test_engineering[, living_area := supply_area - exclusive_use_area]
+dd_test_engineering[, bathroom_per_living_area := bathroom_count/living_area]
+dd_test_engineering[, area_ratio := exclusive_use_area / supply_area]
+dd_test_engineering[, household_ratio := total_household_count_of_area_type / total_household_count_in_sites]
+dd_test_engineering[, total_household_per_building_count := total_household_count_in_sites / apartment_building_count_in_sites]
+dd_test_engineering[, age_of_apartment := 2021 - year_of_completion]
+
+dd_test_engineering[, year := as.numeric(substr(transaction_year_month, 1,4))]
+dd_test_engineering[, month := as.numeric(substr(transaction_year_month, 5,6))]
+
+```
+
+
+
+#### Boosting: cross validation without feature engineering
+```{r}
+boost.price.cv <- gbm(transaction_real_price ~ ., data = train_sample, distribution = "gaussian", n.trees = 5000, interaction.depth = 4, cv.folds=10)
+
+# predict on train dataset
+yhat.boost.cv.train = predict(boost.price.cv, newdata = dd_train, n.trees = which.min(boost.price.cv$cv.error))
+cat("Train RMSE: ", sqrt(mean((dd_train$transaction_real_price - yhat.boost.cv.train)^2)))
+
+# predict on the test dataset using the recommended number of trees
+predictions <- predict(boost.price.cv, newdata=dd_train, n.trees=which.min(boost.price.cv$cv.error))
+cat(" Test RMSE: ", sqrt(mean(dd_train$transaction_real_price - predictions)**2))
+```
+
+The most significant features according to the model.
+```{r}
+summary(boost.price.cv)
+```
+
+
+#### select a random sample of 10000 observations
+```{r}
+train_sample_index = sample(1:nrow(dd_train_engineering),nrow(dd_train_engineering)*4/5)
+train_sample = dd_train_engineering[train_sample_index,]
+tree.testy_sample <- dd_test_engineering[train_sample_index, transaction_real_price]
+```
+
+
+#### Boosting: cross validation with feature engineering
+```{r}
+boost.price.cv <- gbm(transaction_real_price ~ ., data = train_sample, distribution = "gaussian", n.trees = 5000, interaction.depth = 4, cv.folds=10)
+
+yhat.boost.train = predict(boost.price.cv, newdata = dd_train_engineering, n.trees = which.min(boost.price.cv$cv.error))
+cat("RMSE train: ", sqrt(mean((dd_train_engineering$transaction_real_price - yhat.boost.train)^2)))
+
+# predict on the test dataset using the recommended number of trees
+predictions <- predict(boost.price.cv, newdata = dd_test_engineering, n.trees = which.min(boost.price.cv$cv.error))
+cat(" RMSE test: ", sqrt(mean((dd_test_engineering$transaction_real_price - predictions)**2)))
+```
+
+The most significant features according to the model.
+```{r}
+summary(boost.price.cv)
+```
+
+
+
+
